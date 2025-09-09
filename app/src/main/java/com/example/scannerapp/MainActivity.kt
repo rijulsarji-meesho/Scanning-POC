@@ -2,6 +2,7 @@ package com.example.scannerapp // Use your actual package
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -302,6 +303,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var lastValue: String? = null
+    private var stableCount = 0
+    private val requiredStableReads = 2
+
     private fun processImage(
         image: InputImage,
         onSuccess: (String) -> Unit,
@@ -315,11 +320,27 @@ class MainActivity : ComponentActivity() {
 
         scanner.process(image)
             .addOnSuccessListener { barcodes ->
-                if (barcodes.isNotEmpty()) {
-                    barcodes.firstNotNullOfOrNull { it.rawValue }?.let {
-                        onSuccess(it)
+                val first = barcodes.firstOrNull()
+                val value = first?.rawValue
+
+                if (value != null) {
+                    if (value == lastValue) {
+                        stableCount++
+                    } else {
+                        lastValue = value
+                        stableCount = 1
+                    }
+
+                    if (stableCount >= requiredStableReads) {
+                        onSuccess(value)
                     }
                 }
+
+//                if (barcodes.isNotEmpty()) {
+//                    barcodes.firstNotNullOfOrNull { it.rawValue }?.let {
+//                        onSuccess(it)
+//                    }
+//                }
             }
             .addOnFailureListener { e ->
                 onFailure(e)
@@ -385,6 +406,4 @@ class MainActivity : ComponentActivity() {
             webView.destroy()
         }
     }
-
-    // You won't need ScanContract or ScannerActivity anymore with this approach
 }
