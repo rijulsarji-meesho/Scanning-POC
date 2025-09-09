@@ -10,10 +10,11 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.webkit.PermissionRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,6 +32,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
 
@@ -58,6 +60,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraProviderFuture: ListenableFuture<ProcessCameraProvider>
     private lateinit var cameraExecutor: ExecutorService
     private var isScannerVisible = false
+
+    private val isScanningPaused = AtomicBoolean(false)
+    private val pauseHandler = Handler(Looper.getMainLooper())
+    private val scanPauseDurationMs = 5000L // 5 seconds
 
 
     @SuppressLint("SetJavaScriptEnabled", "MissingInflatedId")
@@ -106,7 +112,8 @@ class MainActivity : ComponentActivity() {
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 val originAllowed = isTrustedOrigin(request.origin)
-                val wantsVideo = request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+                val wantsVideo =
+                    request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
 
                 if (!originAllowed || !wantsVideo) {
                     request.deny()
@@ -172,7 +179,8 @@ class MainActivity : ComponentActivity() {
         webViewLayoutParams.weight = 0.5f // Example: give half height to WebView
         webView.layoutParams = webViewLayoutParams
 
-        val scannerLayoutParams = scannerContainer.layoutParams as android.widget.LinearLayout.LayoutParams
+        val scannerLayoutParams =
+            scannerContainer.layoutParams as android.widget.LinearLayout.LayoutParams
         scannerLayoutParams.weight = 0.5f // Example: give half height to Scanner
         scannerContainer.layoutParams = scannerLayoutParams
 
@@ -190,7 +198,8 @@ class MainActivity : ComponentActivity() {
         webViewLayoutParams.weight = 1.0f // WebView takes full weight
         webView.layoutParams = webViewLayoutParams
 
-        val scannerLayoutParams = scannerContainer.layoutParams as android.widget.LinearLayout.LayoutParams
+        val scannerLayoutParams =
+            scannerContainer.layoutParams as android.widget.LinearLayout.LayoutParams
         scannerLayoutParams.weight = 0.0f // Scanner takes no weight
         scannerContainer.layoutParams = scannerLayoutParams
 
@@ -230,26 +239,45 @@ class MainActivity : ComponentActivity() {
 
         try {
             toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-        }   catch (e: RuntimeException) {
+        } catch (e: RuntimeException) {
             android.util.Log.w("ScannerApp", "Failed to create ToneGenerator", e)
             toneGenerator = null // Handle case where ToneGenerator can't be created
         }
 
         imageAnalysis.setAnalyzer(cameraExecutor, { imageProxy ->
+            if (isScanningPaused.get()) {
+                imageProxy.close() // Still need to close the proxy
+                return@setAnalyzer
+            }
+
             val mediaImage = imageProxy.image
             if (mediaImage != null) {
-                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                val image =
+                    InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
                 processImage(image, onSuccess = { result ->
                     // This callback runs on a background thread.
                     // Switch to main thread to update UI or WebView.
                     runOnUiThread {
+                        if (isScanningPaused.get()) { // Double check, in case it was paused while this was enqueued
+                            return@runOnUiThread
+                        }
+
                         playBeep()
+                        isScanningPaused.set(true);
                         if (isScannerVisible) { // Only process if scanner is still open
-                            val js = "window.onScanResult && window.onScanResult(${jsQuote(result)})"
+                            val js =
+                                "window.onScanResult && window.onScanResult(${jsQuote(result)})"
                             webView.evaluateJavascript(js, null)
                             // Consider if you want to automatically hide the scanner after a successful scan
                             // hideScannerView()
                         }
+
+                        // Schedule unpause
+                        pauseHandler.removeCallbacksAndMessages(null);
+                        pauseHandler.postDelayed({
+                            isScanningPaused.set(false)
+                            android.util.Log.d("ScannerApp", "Scanning resumed after pause.")
+                        }, scanPauseDurationMs)
                     }
                 }, onFailure = {
                     // Optional: handle scan failure/no barcode found in frame
@@ -303,15 +331,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun playBeep() {
-        Log.d("ScannerApp", "playBeep() called, toneGenerator is: $toneGenerator")
-        toneGenerator?.startTone(ToneGenerator.TONE_CDMA_PIP, 150) // 150ms duration
+        if (!isScanningPaused.get()) {
+            Log.d("ScannerApp", "playBeep() called, toneGenerator is: $toneGenerator")
+            toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 250) // 150ms duration
+        }
     }
+
     private fun jsQuote(s: String?): String {
         return org.json.JSONObject.quote(s ?: "") // Handle null safely
     }
 
     private fun hasOsCameraPermission(): Boolean =
-        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
 
     private fun isTrustedOrigin(origin: android.net.Uri): Boolean {
         val scheme = origin.scheme ?: return false
